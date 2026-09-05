@@ -7,6 +7,10 @@ struct ReplyView: View {
     @State private var content: String = ""
     @State private var isPosting = false
 
+    // ゲスト返信: 書き終えて「送信」を押した時点で初めて登録を促す。
+    @ObservedObject private var auth = AuthManager.shared
+    @State private var isShowingAuth = false
+
     var body: some View {
         NavigationStack {
             VStack(alignment: .leading, spacing: 16) {
@@ -38,10 +42,26 @@ struct ReplyView: View {
                     }.disabled(content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isPosting)
                 }
             }
+            .sheet(isPresented: $isShowingAuth) {
+                AuthPromptView(message: "登録すると、いま書いた返信がそのまま送信されます。")
+            }
+            .onChange(of: auth.isLoggedIn) { loggedIn in
+                if loggedIn && isShowingAuth {
+                    isShowingAuth = false
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                        submit()
+                    }
+                }
+            }
         }
     }
 
     private func submit() {
+        // ゲストはここで登録へ。content は保持されるので、登録成功後に自動で続行する。
+        guard auth.isLoggedIn else {
+            isShowingAuth = true
+            return
+        }
         isPosting = true
         viewModel.reply(to: parent, content: content)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {

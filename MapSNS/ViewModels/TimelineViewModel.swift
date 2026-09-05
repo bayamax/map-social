@@ -58,7 +58,7 @@ final class TimelineViewModel: ObservableObject {
             })
             .store(in: &cancellables)
     }
-    
+
     func createPost(content: String, location: CLLocation?) {
         APIService.shared.createPost(content: content, location: location)
             .sink(receiveCompletion: { completion in

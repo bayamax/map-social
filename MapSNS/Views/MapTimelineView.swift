@@ -90,9 +90,27 @@ struct MapStyleToggle: View {
 /// マップ/衛星 共通のズーム距離（メートル）。衛星が近すぎないよう少し引いた値。
 private let kStyleZoomDistance: Double = 1700
 
+/// 散歩モードのドラッグ種別（開始位置で決まる）
+enum WalkDragZone { case move, look }
+
 struct MapTimelineView: View {
     @StateObject private var viewModel = TimelineViewModel()
+    @StateObject private var vehicleService = VehicleService()
+    @StateObject private var aircraftService = AircraftService()
+    @StateObject private var webcamService = WebcamService()
+    @StateObject private var iss = ISSService()
+    /// タップされたライブカメラ（シートで再生）
+    @State private var selectedWebcam: Webcam?
+    @StateObject private var weatherService = WeatherService()
+    @StateObject private var walk = WalkController()
+    @StateObject private var presence = PresenceService()
     @EnvironmentObject var locationManager: LocationManager
+    // 散歩モードの操作（下半分=移動 / 上半分=視点回転）
+    @State private var walkDragZone: WalkDragZone?
+    @State private var walkLastLookX: CGFloat = 0
+    // バーチャルスティック表示（移動操作の起点と現在点）
+    @State private var joyStart: CGPoint?
+    @State private var joyCurrent: CGPoint?
     @State private var isPresentingNewPost = false
     @State private var replyingTo: Post?
     @State private var reportingPost: Post?
@@ -110,9 +128,10 @@ struct MapTimelineView: View {
     // 現在地が夜か（通常マップを夜は自動でダーク表示）
     @State private var isNightAtUser = false
     @ObservedObject private var auth = AuthManager.shared
-    @State private var isShowingAuth = false
     // 場所検索シートの表示
     @State private var isShowingSearch = false
+    // 検索で立てたピン（現在地ピンとは別）
+    @State private var searchedPlace: SearchedPlace?
 
     // MARK: - ピン配置（ドラッグ＆ドロップ）モード
     /// ピンを地図に置いて任意地点に投稿するモードか
@@ -121,6 +140,8 @@ struct MapTimelineView: View {
     @GestureState private var isComposeButtonPressed = false
     /// 触る前は現在地アイコンに追従するか（true=追従 / false=ドラッグで自由配置）
     @State private var bubbleFollowsUser = true
+    /// 固定座標アンカー時に吹き出しをピンの上へ持ち上げるか（検索ピン起点など）
+    @State private var bubbleLifted = false
     /// ドラッグ確定後に吹き出しを紐づける地図上の座標
     @State private var bubbleCoordinate: CLLocationCoordinate2D?
     /// ドラッグで確定した投稿地点
@@ -134,22 +155,112 @@ struct MapTimelineView: View {
     var body: some View {
         MapReader { proxy in
         ZStack(alignment: .bottomTrailing) {
-            Map(position: $cameraPosition, interactionModes: .all) {
+            Map(position: $cameraPosition, interactionModes: walk.isActive ? [] : .all) {
                 // 現在地（立体的なカスタムマーカー）
                 if let userLoc = locationManager.lastLocation {
                     Annotation("", coordinate: userLoc.coordinate, anchor: .bottom) {
                         UserLocationMarker3D()
                     }
                 }
+                // 検索した地点のピン（現在地ピンと同じ世界観の立体マーカー・赤系、パルス無し）。タップで消える。
+                if let place = searchedPlace {
+                    Annotation(place.name, coordinate: place.coordinate, anchor: .bottom) {
+                        UserLocationMarker3D(
+                            accent: Color(red: 0.95, green: 0.34, blue: 0.34),
+                            deep: Color(red: 0.70, green: 0.10, blue: 0.12),
+                            pulsing: false
+                        )
+                        .onTapGesture { searchedPlace = nil }
+                    }
+                }
                 // 投稿バブル
                 ForEach(viewModel.postsWithLocation) { post in
                     // しっぽの先（吹き出し下端中央）が座標に一致するよう .bottom アンカー
                     Annotation("", coordinate: post.location!.coordinate, anchor: .bottom) {
-                        ChatBubble(text: post.content)
+                        ChatBubble(text: LinkedText.stripped(post.content))
                             .frame(maxWidth: 160)
                             .shadow(radius: 2)
                             .contentShape(Rectangle())
                             .onTapGesture { viewModel.selectedPost = post }
+                    }
+                }
+
+                // 乗り物（リアルタイム・補間済み）。表示は VehicleService が範囲・上限を管理。
+                ForEach(vehicleService.displayVehicles) { dv in
+                    Annotation("", coordinate: dv.coordinate, anchor: .center) {
+                        VehicleMarker(vehicle: dv,
+                                      mapHeading: currentCamera?.heading ?? 0,
+                                      mapPitch: currentCamera?.pitch ?? 0)
+                    }
+                }
+
+                // 飛行機（adsb.lol・推測航法で滑らかに移動）。乗り物トグルと連動。
+                // 引きの表示では便名を出さない（60機×ラベルはクラッタ）
+                let showFlightLabels = viewModel.region.span.latitudeDelta < 0.8
+                // 地球儀の範囲では、マーカーごとに視点からの角度を幾何で出すためのカメラ
+                let globeCam: MarkerProjection.GlobeCamera? =
+                    (viewModel.region.span.latitudeDelta > AircraftTuning.hideAboveSpan ? currentCamera : nil)
+                        .map { .init(center: $0.centerCoordinate, distance: $0.distance) }
+                ForEach(aircraftService.displayAircraft) { ac in
+                    Annotation("", coordinate: ac.coordinate, anchor: AircraftMarker.anchor) {
+                        // 世界モード（地球儀）は機体ごとに視点からの角度を幾何で出す：
+                        // 視点直下は真上から（平面）、縁に寄るほど横から見た立体になる。
+                        AircraftMarker(aircraft: ac,
+                                       mapHeading: currentCamera?.heading ?? 0,
+                                       mapPitch: currentCamera?.pitch ?? 0,
+                                       showLabel: showFlightLabels && !aircraftService.isWorldMode,
+                                       scale: aircraftService.isWorldMode ? 0.8 : 1,
+                                       liftOverride: aircraftService.isWorldMode ? 15 : nil,
+                                       globe: globeCam)
+                    }
+                }
+
+                // 世界ライブカメラ（タップでシート再生）
+                // ISS のカメラだけは実位置（wheretheiss.at）に追従して地球を回る
+                ForEach(webcamService.cams) { cam in
+                    Annotation(cam.id == "iss" ? "" : cam.displayName,
+                               coordinate: resolvedCoordinate(of: cam),
+                               anchor: cam.id == "iss" ? ISSMarker.anchor : .bottom) {
+                        Group {
+                            if cam.id == "iss" {
+                                // 飛行機と同じ擬似3D。地球儀では視点からの角度、平面ではカメラの傾きで描く
+                                ISSMarker(coordinate: resolvedCoordinate(of: cam),
+                                          heading: iss.heading,
+                                          mapHeading: currentCamera?.heading ?? 0,
+                                          mapPitch: currentCamera?.pitch ?? 0,
+                                          watchers: webcamService.counts[cam.id] ?? 0,
+                                          isDaylight: iss.isDaylight,
+                                          scale: globeCam == nil ? 1 : 0.85,
+                                          globe: globeCam)
+                                    // タップ領域は本体まわりだけ（キャンバスは広いので）
+                                    .contentShape(Rectangle().size(width: 90, height: 70).offset(x: 35, y: 40))
+                            } else {
+                                WebcamMarker(name: cam.displayName,
+                                             watchers: webcamService.counts[cam.id] ?? 0)
+                                    .contentShape(Rectangle())
+                            }
+                        }
+                        .onTapGesture { selectedWebcam = cam }
+                    }
+                }
+
+                // 散歩モードのアバター（自分の仮想の分身）
+                // 他のユーザーの分身（presence）。通常モードでも常に表示。
+                ForEach(presence.others) { p in
+                    Annotation("", coordinate: p.coordinate, anchor: .center) {
+                        AvatarMarker(heading: p.heading,
+                                     mapHeading: currentCamera?.heading ?? 0,
+                                     mapPitch: currentCamera?.pitch ?? 0,
+                                     shirt: Self.avatarColor(for: p.id),
+                                     name: p.name)
+                    }
+                }
+                // 自分の分身（散歩モード中のみ）
+                if walk.isActive {
+                    Annotation("", coordinate: walk.coordinate, anchor: .center) {
+                        AvatarMarker(heading: walk.avatarHeading,
+                                     mapHeading: walk.viewHeading,
+                                     mapPitch: currentCamera?.pitch ?? walk.pitch)
                     }
                 }
 
@@ -161,8 +272,8 @@ struct MapTimelineView: View {
                         : (bubbleCoordinate ?? viewModel.region.center)
                     Annotation("", coordinate: placeCoord, anchor: .bottom) {
                         TypingBubble()
-                            // 追従中はアイコンの上に持ち上げる
-                            .offset(y: bubbleFollowsUser ? -markerLift : 0)
+                            // ピン（現在地/検索）起点のときはアイコンの上に持ち上げる
+                            .offset(y: (bubbleFollowsUser || bubbleLifted) ? -markerLift : 0)
                             .allowsHitTesting(false)
                     }
                 }
@@ -182,6 +293,27 @@ struct MapTimelineView: View {
             .onMapCameraChange(frequency: .continuous) { context in
                 viewModel.region = context.region
                 currentCamera = context.camera
+                // 表示中心を渡す（バックエンドが範囲内の都市だけ返す）
+                vehicleService.updateRegion(context.region)
+                aircraftService.updateRegion(context.region)
+                // presence の観測範囲＝見えている範囲（世界ズームなら地球全体の散歩者が見える）
+                presence.updateFocus(context.region)
+            }
+            // 地図の移動が終わったら、その表示範囲で即取得（移動＝更新トリガー）
+            .onMapCameraChange(frequency: .onEnd) { context in
+                vehicleService.refreshNow(region: context.region)
+                aircraftService.refreshNow(region: context.region)
+                weatherService.updateRegion(context.region)
+                // 見ている場所の昼夜・天気に合わせる
+                updateDayNight()
+            }
+            // 散歩モード：アバターにカメラを追従させる（30fps）
+            .onChange(of: walk.frame) { _, _ in
+                guard walk.isActive else { return }
+                cameraPosition = .camera(MapCamera(centerCoordinate: walk.coordinate,
+                                                   distance: walk.distance,
+                                                   heading: walk.viewHeading,
+                                                   pitch: walk.pitch))
             }
             // スタイル切替時はズーム距離を共通値に揃える
             .onChange(of: isSatellite) { _, _ in
@@ -192,20 +324,35 @@ struct MapTimelineView: View {
                 print("[MapTimelineView] onAppear 呼び出し。初期 region center = {lat: \(viewModel.region.center.latitude), lon: \(viewModel.region.center.longitude)}")
                 print("[MapTimelineView] location authorizationStatus = \(locationManager.authorizationStatus.rawValue)")
                 viewModel.fetchPosts()
-                if locationManager.authorizationStatus == .notDetermined {
-                    locationManager.requestPermission()
-                } else {
+                // 未決定のときの許可要求は ContentView に一元化している
+                // （初回はチュートリアルを見終えてから聞く）。ここでは許可済みの場合だけ開始する。
+                if locationManager.authorizationStatus != .notDetermined {
                     locationManager.startUpdatingLocation()
                 }
+                vehicleService.resumeIfEnabled()
+                aircraftService.resumeIfEnabled()
+                weatherService.resumeIfEnabled()
+                webcamService.loadIfNeeded()
+                webcamService.startCountsPolling()
+                iss.start()
+                presence.start()
+                presence.updateFocus(viewModel.region)
                 updateDayNight()
+                applyScreenshotHooksIfNeeded()
+            }
+            .onDisappear {
+                // タブを離れたら通信は止める（有効状態は保持）
+                vehicleService.pause()
+                aircraftService.pause()
+                weatherService.pause()
+                webcamService.stopCountsPolling()
+                iss.stop()
+                presence.stop()
             }
             .onReceive(NotificationCenter.default.publisher(for: .init("OpenReply"))) { notif in
                 if let p = notif.object as? Post {
-                    if auth.isLoggedIn {
-                        replyingTo = p
-                    } else {
-                        isShowingAuth = true
-                    }
+                    // ゲストも返信画面は開ける。登録を促すのは「送信」を押した時（ReplyView 側）。
+                    replyingTo = p
                 }
             }
             .onReceive(NotificationCenter.default.publisher(for: .init("ReportPost"))) { notif in
@@ -226,25 +373,87 @@ struct MapTimelineView: View {
                 }
                 updateDayNight()
             }
-            .onReceive(auth.$isLoggedIn) { loggedIn in
-                if loggedIn {
-                    isShowingAuth = false
-                } else {
-                    // ログアウト後または初回起動時にゲストとしてタイムラインを更新
-                    print("[MapTimelineView] Detected logout/guest mode. Refetching timeline.")
-                    viewModel.fetchPosts()
-                }
+            .onReceive(auth.$isLoggedIn) { _ in
+                // ゲスト⇄ログインで取得内容（いいね状態・ブロック除外）が変わるので取り直す
+                viewModel.fetchPosts()
             }
 
-            // ピン配置中のドラッグ捕捉レイヤー（吹き出しの周辺だけを捕捉。それ以外は地図のパン・回転に通す）
-            // Map と同じ領域（セーフエリア無視）に重ね、座標変換のズレを防ぐ
-            if isPlacingPin {
+            // 天気エフェクト（雨/雪/霧）。地図の上・ボタンの下に重ねる。タッチは透過。
+            if weatherService.isEnabled {
+                WeatherOverlay(effect: weatherService.effect)
+                    .allowsHitTesting(false)
+            }
+
+            // 散歩モードの操作レイヤー：下半分ドラッグ=移動 / 上半分ドラッグ=視点回転
+            // （投稿配置中は歩行を止める）
+            if walk.isActive && !isPlacingPin {
+                GeometryReader { geo in
+                    ZStack {
+                        Color.white.opacity(0.001)
+                            .contentShape(Rectangle())
+                            .gesture(
+                                DragGesture(minimumDistance: 2)
+                                    .onChanged { v in
+                                        if walkDragZone == nil {
+                                            walkDragZone = v.startLocation.y > geo.size.height * 0.5 ? .move : .look
+                                        }
+                                        switch walkDragZone {
+                                        case .move:
+                                            walk.setMove(v.translation)
+                                            joyStart = v.startLocation
+                                            joyCurrent = v.location
+                                        case .look:
+                                            // 指のスライド方向と地図の回り方を一致させる（符号反転）
+                                            let d = v.translation.width - walkLastLookX
+                                            walk.rotateView(by: Double(d) * -0.4)
+                                            walkLastLookX = v.translation.width
+                                        case .none:
+                                            break
+                                        }
+                                    }
+                                    .onEnded { _ in
+                                        walk.clearMove()
+                                        walkDragZone = nil
+                                        walkLastLookX = 0
+                                        joyStart = nil
+                                        joyCurrent = nil
+                                    }
+                            )
+
+                        // バーチャルスティック（移動の起点＝最初のタッチ点に表示）
+                        if let s = joyStart, let c = joyCurrent {
+                            let r: CGFloat = 46
+                            let dx = c.x - s.x, dy = c.y - s.y
+                            let dist = max(hypot(dx, dy), 0.0001)
+                            let kx = dist > r ? s.x + dx / dist * r : c.x
+                            let ky = dist > r ? s.y + dy / dist * r : c.y
+                            Group {
+                                Circle()
+                                    .fill(Color.black.opacity(0.12))
+                                    .overlay(Circle().stroke(Color.white.opacity(0.55), lineWidth: 2))
+                                    .frame(width: r * 2, height: r * 2)
+                                    .position(s)
+                                Circle()
+                                    .fill(Color.white.opacity(0.5))
+                                    .overlay(Circle().stroke(.white.opacity(0.85), lineWidth: 1.5))
+                                    .frame(width: 44, height: 44)
+                                    .position(x: kx, y: ky)
+                            }
+                            .allowsHitTesting(false)
+                        }
+                    }
+                }
+                .ignoresSafeArea()
+            }
+
+            // ピン配置中のドラッグ捕捉レイヤー（吹き出しの周辺だけを捕捉）。散歩モードはアバター位置固定なので不要。
+            if isPlacingPin && !walk.isActive {
                 GeometryReader { _ in
                     let placeCoord = bubbleFollowsUser
                         ? (locationManager.lastLocation?.coordinate ?? viewModel.region.center)
                         : (bubbleCoordinate ?? viewModel.region.center)
                     if let foot = proxy.convert(placeCoord, to: .local) {
-                        let lift: CGFloat = bubbleFollowsUser ? markerLift : 0
+                        let lift: CGFloat = (bubbleFollowsUser || bubbleLifted) ? markerLift : 0
                         let center = CGPoint(x: foot.x,
                                              y: foot.y - lift - TypingBubble.estimatedHeight / 2)
                         // 吹き出し付近だけの透明な掴みエリア
@@ -255,6 +464,7 @@ struct MapTimelineView: View {
                                 DragGesture(minimumDistance: 1, coordinateSpace: .named("dragCatcher"))
                                     .onChanged { value in
                                         bubbleFollowsUser = false
+                                        bubbleLifted = false
                                         if let c = proxy.convert(value.location, from: .local) {
                                             bubbleCoordinate = c
                                         }
@@ -277,6 +487,30 @@ struct MapTimelineView: View {
                             .background(Color.black.opacity(0.6))
                             .clipShape(Circle())
                     }
+                    // 動くもの（バス・電車=GTFS-Realtime ＋ 飛行機=ADS-B）表示トグル
+                    Button(action: { toggleVehicles() }) {
+                        Image(systemName: isMovingLayerOn ? "bus.fill" : "bus")
+                            .foregroundColor(.white)
+                            .padding(14)
+                            .background(isMovingLayerOn ? Color.green.opacity(0.85) : Color.black.opacity(0.6))
+                            .clipShape(Circle())
+                    }
+                    // 天気エフェクト トグル（雨/雪の演出。デフォルトOFF）
+                    Button(action: { toggleWeather() }) {
+                        Image(systemName: weatherService.isEnabled ? weatherIconName : "cloud")
+                            .foregroundColor(.white)
+                            .padding(14)
+                            .background(weatherService.isEnabled ? Color.blue.opacity(0.85) : Color.black.opacity(0.6))
+                            .clipShape(Circle())
+                    }
+                    // 散歩モード（仮想アバターで歩く）。もう一度押すと終了。
+                    Button(action: { toggleWalk() }) {
+                        Image(systemName: "figure.walk")
+                            .foregroundColor(.white)
+                            .padding(14)
+                            .background(walk.isActive ? Color.orange.opacity(0.9) : Color.black.opacity(0.6))
+                            .clipShape(Circle())
+                    }
                     MapStyleToggle(isSatellite: $isSatellite)
                 }
                 // 投稿（💬）ボタン: 押すと色が変わり吹き出しを掴む。スライドして離した場所に置く。
@@ -294,10 +528,18 @@ struct MapTimelineView: View {
                         DragGesture(minimumDistance: 0, coordinateSpace: .named("appSpace"))
                             .updating($isComposeButtonPressed) { _, state, _ in state = true }
                             .onChanged { value in
-                                guard auth.isLoggedIn else { return }
+                                // 散歩モード：アバターの座標に固定で吹き出し（持ち上げ＝現在地投稿と同じ高さ）
+                                if walk.isActive {
+                                    isPlacingPin = true
+                                    bubbleFollowsUser = false
+                                    bubbleLifted = true
+                                    bubbleCoordinate = walk.coordinate
+                                    return
+                                }
                                 if !isPlacingPin {
                                     isPlacingPin = true
                                     bubbleFollowsUser = false
+                                    bubbleLifted = false
                                 }
                                 // 足先が指の位置に来るよう少し下げて変換
                                 let pt = CGPoint(x: value.location.x, y: value.location.y + composeDragFootOffset)
@@ -306,22 +548,36 @@ struct MapTimelineView: View {
                                 }
                             }
                             .onEnded { value in
-                                guard auth.isLoggedIn else { isShowingAuth = true; return }
+                                // 散歩モード：アバール位置に確定（高さ織り込み）
+                                if walk.isActive {
+                                    bubbleFollowsUser = false
+                                    bubbleLifted = true
+                                    bubbleCoordinate = walk.coordinate
+                                    return
+                                }
                                 let moved = hypot(value.translation.width, value.translation.height)
                                 if moved <= 8 {
-                                    // タップ扱い: 既定の配置（現在地が見えていれば追従、なければ中央）
-                                    if let userCoord = locationManager.lastLocation?.coordinate,
-                                       isCoordinateVisible(userCoord) {
+                                    // タップ扱い: 既定の配置
+                                    // 優先順位: 画面内の検索ピン → 画面内の現在地 → 中央
+                                    if let place = searchedPlace, isCoordinateVisible(place.coordinate) {
+                                        bubbleFollowsUser = false
+                                        bubbleLifted = true
+                                        bubbleCoordinate = place.coordinate
+                                    } else if let userCoord = locationManager.lastLocation?.coordinate,
+                                              isCoordinateVisible(userCoord) {
                                         bubbleFollowsUser = true
+                                        bubbleLifted = false
                                         bubbleCoordinate = nil
                                     } else {
                                         bubbleFollowsUser = false
+                                        bubbleLifted = false
                                         bubbleCoordinate = viewModel.region.center
                                     }
                                 } else {
                                     let pt = CGPoint(x: value.location.x, y: value.location.y + composeDragFootOffset)
                                     if let c = proxy.convert(pt, from: .local) {
                                         bubbleFollowsUser = false
+                                        bubbleLifted = false
                                         bubbleCoordinate = c
                                     }
                                 }
@@ -348,9 +604,62 @@ struct MapTimelineView: View {
         }
         .ignoresSafeArea(.container, edges: .top)
         .coordinateSpace(.named("appSpace"))
+        // 散歩モード：注釈（他人にも見えている）。プライバシー配慮の明示。
+        .overlay(alignment: .top) {
+            if walk.isActive {
+                Text("散歩中：あなたのアバターが近くの人にも見えています")
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(Color.black.opacity(0.55), in: Capsule())
+                    .padding(.top, 60)
+            }
+        }
+        // 地球のどこかで散歩中の人（見えている範囲の人数）。タップでその人のところへ飛ぶ。
+        .overlay(alignment: .top) {
+            if !walk.isActive && !isPlacingPin && !presence.others.isEmpty {
+                let n = presence.others.count
+                let isWorld = viewModel.region.span.latitudeDelta > 20
+                Button {
+                    if let p = presence.others.first {
+                        withAnimation(.easeInOut(duration: 1.2)) {
+                            cameraPosition = .camera(MapCamera(centerCoordinate: p.coordinate,
+                                                               distance: 1200, heading: 0, pitch: 55))
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "figure.walk")
+                        if isWorld { Text("いま \(n) 人が地球を散歩中") } else { Text("この範囲で \(n) 人が散歩中") }
+                        Image(systemName: "chevron.right")
+                            .font(.caption2.weight(.bold))
+                            .opacity(0.7)
+                    }
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(Color.black.opacity(0.55), in: Capsule())
+                }
+                .padding(.top, 60)
+                .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        // 散歩モード：操作ヒント
+        .overlay(alignment: .bottom) {
+            if walk.isActive && !isPlacingPin {
+                Text("下半分ドラッグ＝移動 ／ 上半分＝見回す ／ 🚶ボタンで終了")
+                    .font(.caption)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(.ultraThinMaterial, in: Capsule())
+                    .padding(.bottom, 24)
+            }
+        }
         // 配置モードの説明バナー
         .overlay(alignment: .top) {
-            if isPlacingPin {
+            if isPlacingPin && !walk.isActive {
                 Text("吹き出しをドラッグして投稿する場所を決めてください")
                     .font(.subheadline)
                     .padding(.horizontal, 16)
@@ -382,7 +691,8 @@ struct MapTimelineView: View {
                 .environmentObject(locationManager)
         }
         .sheet(isPresented: $isShowingSearch) {
-            PlaceSearchView { coordinate in
+            PlaceSearchView { coordinate, name in
+                searchedPlace = SearchedPlace(coordinate: coordinate, name: name)
                 withAnimation {
                     cameraPosition = .camera(tiltedCamera(at: coordinate))
                 }
@@ -391,11 +701,11 @@ struct MapTimelineView: View {
         .sheet(item: $viewModel.selectedPost) { post in
             PostDetailSheet(post: post)
         }
+        .sheet(item: $selectedWebcam) { cam in
+            WebcamPlayerView(webcam: cam)
+        }
         .sheet(item: $replyingTo) { parent in
             ReplyView(parent: parent, viewModel: viewModel)
-        }
-        .fullScreenCover(isPresented: $isShowingAuth) {
-            LoginView()
         }
         .alert("投稿を通報しますか？", isPresented: Binding(get: { reportingPost != nil }, set: { newVal in if !newVal { reportingPost = nil } })) {
             Button("キャンセル", role: .cancel) { reportingPost = nil }
@@ -411,6 +721,62 @@ struct MapTimelineView: View {
 
     // MARK: - カメラ
     /// 指定座標を中心にした 3D（傾き付き）カメラを返す
+    /// スクリーンショット撮影用フック（DEBUGビルド限定・環境変数があるときだけ動く。Releaseには含まれない）
+    /// ライブカメラの表示座標。ISS は登録座標ではなく実位置。
+    private func resolvedCoordinate(of cam: Webcam) -> CLLocationCoordinate2D {
+        cam.id == "iss" ? (iss.coordinate ?? cam.coordinate) : cam.coordinate
+    }
+
+    /// SCREENSHOT_CAMERA="lat,lon,distance[,pitch]" で地図カメラを固定、
+    /// SCREENSHOT_OPENCAM="<webcam id>" で指定ライブカメラのシートを自動で開く。
+    private func applyScreenshotHooksIfNeeded() {
+        #if DEBUG
+        let env = ProcessInfo.processInfo.environment
+        if let spec = env["SCREENSHOT_CAMERA"] {
+            let p = spec.split(separator: ",").compactMap { Double($0) }
+            if p.count >= 3 {
+                let pitch = p.count >= 4 ? p[3] : 0
+                // 初回位置取得のカメラ移動と競合しないよう、SCREENSHOT_CAMERA_DELAY 秒（既定2）待ってから当てる
+                let delay = Double(env["SCREENSHOT_CAMERA_DELAY"] ?? "") ?? 2
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                    cameraPosition = .camera(MapCamera(
+                        centerCoordinate: .init(latitude: p[0], longitude: p[1]),
+                        distance: p[2], heading: 0, pitch: pitch))
+                }
+            }
+        }
+        // SCREENSHOT_VEHICLES=1 / SCREENSHOT_WEATHER=1 でレイヤーを自動ON（カメラ固定後に範囲を渡す）
+        if env["SCREENSHOT_VEHICLES"] == "1" || env["SCREENSHOT_WEATHER"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
+                if env["SCREENSHOT_VEHICLES"] == "1", !vehicleService.isEnabled {
+                    vehicleService.start(region: viewModel.region)
+                    // 傾けたカメラでは region.center が注視点から大きくずれるので、モック機体はカメラ中心に撒く
+                    var r = viewModel.region
+                    if let c = currentCamera?.centerCoordinate { r.center = c }
+                    aircraftService.start(region: r)
+                }
+                if env["SCREENSHOT_WEATHER"] == "1", !weatherService.isEnabled {
+                    weatherService.start(region: viewModel.region)
+                }
+            }
+        }
+        if let camID = env["SCREENSHOT_OPENCAM"] {
+            // 一覧ロードが遅い環境でも空振りしないよう、見つかるまで最大30秒リトライ
+            Task { @MainActor in
+                for _ in 0..<30 {
+                    if let cam = webcamService.cams.first(where: { $0.id == camID }) {
+                        try? await Task.sleep(nanoseconds: 2_000_000_000)
+                        cameraPosition = .camera(tiltedCamera(at: cam.coordinate))
+                        selectedWebcam = cam
+                        return
+                    }
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                }
+            }
+        }
+        #endif
+    }
+
     private func tiltedCamera(at coordinate: CLLocationCoordinate2D) -> MapCamera {
         MapCamera(centerCoordinate: coordinate, distance: kStyleZoomDistance, heading: 0, pitch: 55)
     }
@@ -428,12 +794,57 @@ struct MapTimelineView: View {
         }
     }
 
-    /// 現在地の昼夜を判定して isNightAtUser を更新（現在地不明なら region 中心で代用）
+    /// 「見ている地図の中心」で昼夜を判定（現在地ではなく表示中の場所に合わせる＝世界都市に追従）
     private func updateDayNight() {
-        let coord = locationManager.lastLocation?.coordinate ?? viewModel.region.center
+        let coord = viewModel.region.center
         isNightAtUser = SolarCalculator.isNight(latitude: coord.latitude,
                                                 longitude: coord.longitude,
                                                 date: Date())
+    }
+
+    private func toggleWeather() {
+        if weatherService.isEnabled {
+            weatherService.stop()
+        } else {
+            weatherService.start(region: viewModel.region)
+        }
+    }
+
+    /// 散歩モードの ON/OFF。ON で今の地図中心にアバターを置き、寄りの追従カメラへ。
+    private func toggleWalk() {
+        if walk.isActive {
+            presence.endWalking()
+            walk.stop()
+        } else {
+            let center = viewModel.region.center
+            let heading = currentCamera?.heading ?? 0
+            walk.start(at: center, heading: heading)
+            presence.setWalking(me: walk, name: AuthManager.shared.currentUser?.username ?? "さんぽ")
+            withAnimation(.easeInOut(duration: 0.5)) {
+                cameraPosition = .camera(MapCamera(centerCoordinate: center,
+                                                   distance: walk.distance,
+                                                   heading: heading,
+                                                   pitch: walk.pitch))
+            }
+        }
+    }
+
+    /// 他者アバターの色（IDから決定的に色相を決める）
+    static func avatarColor(for id: String) -> Color {
+        var h: UInt64 = 5381
+        for b in id.utf8 { h = h &* 33 &+ UInt64(b) }
+        let hue = Double(h % 360) / 360.0
+        return Color(hue: hue, saturation: 0.7, brightness: 0.85)
+    }
+
+    /// 天気トグルのアイコン（ON時は現在のエフェクトを表す）
+    private var weatherIconName: String {
+        switch weatherService.effect {
+        case .rain: return "cloud.rain.fill"
+        case .snow: return "snowflake"
+        case .fog:  return "cloud.fog.fill"
+        case .none: return "cloud.sun.fill"
+        }
     }
 
     // MARK: - ピン配置ヘルパー
@@ -452,6 +863,21 @@ struct MapTimelineView: View {
             : (bubbleCoordinate ?? viewModel.region.center)
         isPlacingPin = false
         isPresentingNewPost = true
+    }
+
+    // MARK: - 動くもの（リアルタイム）
+    private var isMovingLayerOn: Bool { vehicleService.isEnabled || aircraftService.isEnabled }
+
+    /// 動くもの表示の ON/OFF。バス（対応都市のみ）と飛行機（世界中）を同時に切り替える。
+    /// カメラは動かさず、今見ている範囲で取得（移動は不要）。
+    private func toggleVehicles() {
+        if isMovingLayerOn {
+            vehicleService.stop()
+            aircraftService.stop()
+        } else {
+            vehicleService.start(region: viewModel.region)
+            aircraftService.start(region: viewModel.region)
+        }
     }
 }
 
@@ -480,7 +906,7 @@ struct PostDetailSheet: View {
                         }
                     }
                 }
-            Text(post.content)
+            LinkedText(post.content)
                 .font(.body)
             if let loc = post.location {
                 Text("\(loc.latitude), \(loc.longitude)")
@@ -574,7 +1000,7 @@ struct PostDetailSheet: View {
                                 .font(.caption2)
                                 .foregroundColor(.secondary)
                         }
-                        Text(reply.content)
+                        LinkedText(reply.content)
                             .font(.caption)
                             .foregroundColor(.primary)
                             .padding(6)
@@ -621,8 +1047,14 @@ struct PostDetailSheet: View {
 /// ツヤのある球体ヘッド（少し小さめ）＋はっきりしたソリッドな脚＋地面の影とパルスリング。
 /// 傾いた 3D マップ上でも立体的に見える現在地マーカー。
 struct UserLocationMarker3D: View {
+    /// 球体・脚・パルスの基調色
+    var accent: Color = Color(red: 0.13, green: 0.55, blue: 1.0)
+    /// 球体の深い影色（グラデの最暗部）
+    var deep: Color = Color(red: 0.0, green: 0.28, blue: 0.75)
+    /// パルスリングを出すか（現在地=true / 検索ピン=false）
+    var pulsing: Bool = true
+
     @State private var pulse = false
-    private let accent = Color(red: 0.13, green: 0.55, blue: 1.0)
 
     var body: some View {
         VStack(spacing: -2) {
@@ -634,7 +1066,7 @@ struct UserLocationMarker3D: View {
                             .white,
                             accent,
                             accent.opacity(0.9),
-                            Color(red: 0.0, green: 0.28, blue: 0.75)
+                            deep
                         ],
                         center: UnitPoint(x: 0.33, y: 0.28),
                         startRadius: 0,
@@ -670,23 +1102,26 @@ struct UserLocationMarker3D: View {
                 .overlay(Capsule().stroke(.white.opacity(0.9), lineWidth: 1))
                 .shadow(color: .black.opacity(0.2), radius: 1.5, x: 0, y: 1)
 
-            // 地面の影＋パルスリング
+            // 地面の影＋（現在地のみ）パルスリング
             ZStack {
                 Ellipse()
                     .fill(.black.opacity(0.28))
                     .frame(width: 18, height: 6)
                     .blur(radius: 2)
-                Ellipse()
-                    .stroke(accent.opacity(0.6), lineWidth: 2)
-                    .frame(width: 16, height: 6)
-                    .scaleEffect(pulse ? 2.6 : 1.0)
-                    .opacity(pulse ? 0 : 0.7)
+                if pulsing {
+                    Ellipse()
+                        .stroke(accent.opacity(0.6), lineWidth: 2)
+                        .frame(width: 16, height: 6)
+                        .scaleEffect(pulse ? 2.6 : 1.0)
+                        .opacity(pulse ? 0 : 0.7)
+                }
             }
         }
+        // 波紋だけをアニメーションする（withAnimation で包むとピンの位置更新まで巻き込まれて揺れる）
+        .animation(pulsing ? .easeOut(duration: 1.8).repeatForever(autoreverses: false) : nil, value: pulse)
         .onAppear {
-            withAnimation(.easeOut(duration: 1.8).repeatForever(autoreverses: false)) {
-                pulse = true
-            }
+            guard pulsing else { return }
+            pulse = true
         }
     }
 }
@@ -813,55 +1248,81 @@ final class PlaceSearchCompleter: NSObject, ObservableObject, MKLocalSearchCompl
     }
 }
 
-/// 場所検索シート。候補をタップするとその座標を onSelect で返す。
+/// 検索で立てるピンの情報
+struct SearchedPlace: Identifiable {
+    let id = UUID()
+    let coordinate: CLLocationCoordinate2D
+    let name: String
+}
+
+/// 場所検索シート。候補をタップすると座標と名称を onSelect で返す。
+/// NavigationStack/.searchable は使わず、シンプルな自前レイアウトで状態の持ち越しを防ぐ。
 struct PlaceSearchView: View {
     @StateObject private var model = PlaceSearchCompleter()
     @Environment(\.dismiss) private var dismiss
-    var onSelect: (CLLocationCoordinate2D) -> Void
+    @FocusState private var fieldFocused: Bool
+    var onSelect: (CLLocationCoordinate2D, String) -> Void
 
     var body: some View {
-        NavigationStack {
-            List(model.results, id: \.self) { result in
-                Button {
-                    resolve(result)
-                } label: {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(result.title)
-                            .foregroundColor(.primary)
-                        if !result.subtitle.isEmpty {
-                            Text(result.subtitle)
-                                .font(.caption)
-                                .foregroundColor(.secondary)
+        VStack(spacing: 0) {
+            // 検索バー（虫眼鏡 + 入力 + クリア + 閉じる）
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundColor(.secondary)
+                TextField("場所を検索", text: $model.query)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .focused($fieldFocused)
+                    .submitLabel(.search)
+                if !model.query.isEmpty {
+                    Button {
+                        model.query = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundColor(.secondary)
+                    }
+                }
+                Button("閉じる") { dismiss() }
+            }
+            .padding()
+
+            Divider()
+
+            if model.query.trimmingCharacters(in: .whitespaces).isEmpty {
+                ContentUnavailableView("場所を検索", systemImage: "magnifyingglass",
+                                       description: Text("地名・住所・施設名を入力してください"))
+            } else if model.results.isEmpty {
+                ContentUnavailableView.search(text: model.query)
+            } else {
+                List(model.results, id: \.self) { result in
+                    Button {
+                        resolve(result)
+                    } label: {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(result.title)
+                                .foregroundColor(.primary)
+                            if !result.subtitle.isEmpty {
+                                Text(result.subtitle)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
                         }
                     }
                 }
-            }
-            .listStyle(.plain)
-            .overlay {
-                if model.query.isEmpty {
-                    ContentUnavailableView("場所を検索", systemImage: "magnifyingglass",
-                                           description: Text("地名・住所・施設名を入力してください"))
-                } else if model.results.isEmpty {
-                    ContentUnavailableView.search(text: model.query)
-                }
-            }
-            .searchable(text: $model.query, placement: .navigationBarDrawer(displayMode: .always), prompt: "場所を検索")
-            .navigationTitle("検索")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("閉じる") { dismiss() }
-                }
+                .listStyle(.plain)
             }
         }
+        .onAppear { fieldFocused = true }
     }
 
     /// 候補を実際の座標に解決して返す
     private func resolve(_ completion: MKLocalSearchCompletion) {
         let request = MKLocalSearch.Request(completion: completion)
         MKLocalSearch(request: request).start { response, _ in
-            guard let coordinate = response?.mapItems.first?.placemark.coordinate else { return }
-            onSelect(coordinate)
+            let item = response?.mapItems.first
+            guard let coordinate = item?.placemark.coordinate else { return }
+            let name = item?.name ?? completion.title
+            onSelect(coordinate, name)
             dismiss()
         }
     }

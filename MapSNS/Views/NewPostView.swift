@@ -7,9 +7,14 @@ struct NewPostView: View {
     @ObservedObject var viewModel: TimelineViewModel
     
     @State private var content: String = ""
-    @AppStorage("defaultIncludeLocation") private var defaultIncludeLocation = false
+    @AppStorage("defaultIncludeLocation") private var defaultIncludeLocation = true
     @State private var includeLocation: Bool
     @State private var isPosting = false
+
+    // ゲスト投稿: 書き終えて「投稿」を押した時点で初めて登録を促す。
+    // 入力内容は content に残したままなので、登録後そのまま投稿できる。
+    @ObservedObject private var auth = AuthManager.shared
+    @State private var isShowingAuth = false
 
     /// 地図上で選択した投稿地点。指定された場合は常にこの座標を添付する。
     let presetCoordinate: CLLocationCoordinate2D?
@@ -17,7 +22,9 @@ struct NewPostView: View {
     init(viewModel: TimelineViewModel, presetCoordinate: CLLocationCoordinate2D? = nil) {
         self.viewModel = viewModel
         self.presetCoordinate = presetCoordinate
-        _includeLocation = State(initialValue: UserDefaults.standard.object(forKey: "defaultIncludeLocation") as? Bool ?? false)
+        // 地図SNSなので既定は「位置つき」。位置が無い投稿は地図に出ないため、
+        // 既定 false だと「投稿したのに何も起きない」体験になってしまう。
+        _includeLocation = State(initialValue: UserDefaults.standard.object(forKey: "defaultIncludeLocation") as? Bool ?? true)
     }
 
     var body: some View {
@@ -76,27 +83,47 @@ struct NewPostView: View {
                 }
             }
         }
-        .alert("位置情報をデフォルトでオンにして投稿しますか？", isPresented: $isShowingLocationPrompt) {
-            Button("いいえ", role: .cancel) {
-                // 何もしない -> 投稿せず戻る
-                dismiss()
-            }
-            Button("はい") {
-                // デフォルトをオンにして投稿
+        // 場所の選択は非破壊にする。以前は「いいえ」で書いた内容ごと破棄していた。
+        .alert("この投稿をどこに置きますか？", isPresented: $isShowingLocationPrompt) {
+            Button("現在地に置く") {
                 includeLocation = true
                 defaultIncludeLocation = true
                 locationManager.requestPermission()
                 submitPost()
             }
+            Button("場所を付けずに投稿") {
+                // 位置なし投稿はそのまま送るが、地図には出ないことを message で伝えてある
+                submitPost()
+            }
+            Button("キャンセル", role: .cancel) {}
+        } message: {
+            Text("場所を付けない投稿は、地図の吹き出しには表示されません。")
         }
         .onAppear {
             if includeLocation {
                 locationManager.requestPermission()
             }
         }
+        .sheet(isPresented: $isShowingAuth) {
+            AuthPromptView(message: "登録すると、いま書いた内容がこの場所に置かれます。")
+        }
+        .onChange(of: auth.isLoggedIn) { loggedIn in
+            // 登録/ログイン成功 → 中断していた投稿をそのまま続行する
+            if loggedIn && isShowingAuth {
+                isShowingAuth = false
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                    submitPost()
+                }
+            }
+        }
     }
     
     private func submitPost() {
+        // ゲストはここで登録へ。content は保持されるので、登録成功後に自動で続行する。
+        guard auth.isLoggedIn else {
+            isShowingAuth = true
+            return
+        }
         isPosting = true
         let location: CLLocation?
         if let coord = presetCoordinate {
