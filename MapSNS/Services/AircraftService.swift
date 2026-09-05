@@ -79,8 +79,9 @@ final class AircraftService: ObservableObject {
         startTimers()
         #if DEBUG
         if ProcessInfo.processInfo.environment["SCREENSHOT_MOCK_AIRCRAFT"] == "1" {
+            // モックはローカル表示だけ。世界モードは実データを取る（動画で地球儀→空港と続けて撮るため）
             seedMock(around: region.center)
-            return
+            if !isWorldMode { return }
         }
         #endif
         poll()
@@ -152,7 +153,14 @@ final class AircraftService: ObservableObject {
     // MARK: 取得
     private func poll() {
         #if DEBUG
-        if mockEnabled { tick(); return }
+        if mockEnabled, !isWorldMode {
+            // カメラ中心が大きく動いていたら（飛行後など）新しい中心に撒き直す
+            if let c = region?.center, let t = tracks.values.first,
+               abs(t.lat - c.latitude) + abs(t.lon - c.longitude) > 0.3 {
+                tracks.removeAll(); seedMock(around: c)
+            }
+            tick(); return
+        }
         #endif
         guard let r = region else { return }
         let now = CACurrentMediaTime()

@@ -295,14 +295,14 @@ struct MapTimelineView: View {
                 currentCamera = context.camera
                 // 表示中心を渡す（バックエンドが範囲内の都市だけ返す）
                 vehicleService.updateRegion(context.region)
-                aircraftService.updateRegion(context.region)
+                aircraftService.updateRegion(screenshotAdjusted(context))
                 // presence の観測範囲＝見えている範囲（世界ズームなら地球全体の散歩者が見える）
                 presence.updateFocus(context.region)
             }
             // 地図の移動が終わったら、その表示範囲で即取得（移動＝更新トリガー）
             .onMapCameraChange(frequency: .onEnd) { context in
                 vehicleService.refreshNow(region: context.region)
-                aircraftService.refreshNow(region: context.region)
+                aircraftService.refreshNow(region: screenshotAdjusted(context))
                 weatherService.updateRegion(context.region)
                 // 見ている場所の昼夜・天気に合わせる
                 updateDayNight()
@@ -760,6 +760,44 @@ struct MapTimelineView: View {
                 }
             }
         }
+        // SCREENSHOT_TOUR="at,dur,lat,lon,distance,pitch[,heading];at,cam,<webcam id>;at,close;…"
+        // App Preview 動画用：起動 at 秒後にカメラを dur 秒かけて移動／ライブカメラを開閉する
+        if let tour = env["SCREENSHOT_TOUR"] {
+            for step in tour.split(separator: ";") {
+                let f = step.split(separator: ",").map { String($0).trimmingCharacters(in: .whitespaces) }
+                guard f.count >= 2, let at = Double(f[0]) else { continue }
+                DispatchQueue.main.asyncAfter(deadline: .now() + at) {
+                    if f[1] == "cam", f.count >= 3 {
+                        if let cam = webcamService.cams.first(where: { $0.id == f[2] }) { selectedWebcam = cam }
+                    } else if f[1] == "close" {
+                        selectedWebcam = nil
+                    } else if f[1] == "spin", f.count >= 8, let dur = Double(f[2]) {
+                        // MapKit の暗黙アニメは長い duration を無視するので、地球儀の低速回転は自前で刻む
+                        let v = f[3...7].compactMap(Double.init)
+                        guard v.count == 5 else { return }
+                        let t0 = CACurrentMediaTime()
+                        Timer.scheduledTimer(withTimeInterval: 1.0 / 30, repeats: true) { timer in
+                            let k = min((CACurrentMediaTime() - t0) / dur, 1)
+                            let e = k < 0.5 ? 2 * k * k : 1 - pow(-2 * k + 2, 2) / 2   // easeInOut
+                            var tx = Transaction(); tx.disablesAnimations = true
+                            withTransaction(tx) {
+                                cameraPosition = .camera(MapCamera(
+                                    centerCoordinate: .init(latitude: v[0] + (v[2] - v[0]) * e, longitude: v[1] + (v[3] - v[1]) * e),
+                                    distance: v[4], heading: 0, pitch: 0))
+                            }
+                            if k >= 1 { timer.invalidate() }
+                        }
+                    } else if f.count >= 6, let dur = Double(f[1]), let lat = Double(f[2]), let lon = Double(f[3]),
+                              let dist = Double(f[4]), let pitch = Double(f[5]) {
+                        let heading = f.count >= 7 ? (Double(f[6]) ?? 0) : 0
+                        withAnimation(.easeInOut(duration: dur)) {
+                            cameraPosition = .camera(MapCamera(centerCoordinate: .init(latitude: lat, longitude: lon),
+                                                               distance: dist, heading: heading, pitch: pitch))
+                        }
+                    }
+                }
+            }
+        }
         if let camID = env["SCREENSHOT_OPENCAM"] {
             // 一覧ロードが遅い環境でも空振りしないよう、見つかるまで最大30秒リトライ
             Task { @MainActor in
@@ -775,6 +813,15 @@ struct MapTimelineView: View {
             }
         }
         #endif
+    }
+
+    /// 撮影用モック機体はカメラの注視点に撒きたい（傾けた地図では region.center が大きく北にずれる）
+    private func screenshotAdjusted(_ context: MapCameraUpdateContext) -> MKCoordinateRegion {
+        var r = context.region
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["SCREENSHOT_MOCK_AIRCRAFT"] == "1" { r.center = context.camera.centerCoordinate }
+        #endif
+        return r
     }
 
     private func tiltedCamera(at coordinate: CLLocationCoordinate2D) -> MapCamera {
