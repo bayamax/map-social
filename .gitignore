@@ -16,3 +16,4 @@ credentials
 *.p8
 AuthKey_*.p8
 marketing/captures/
+marketing/scripts/presence_raw.txt
