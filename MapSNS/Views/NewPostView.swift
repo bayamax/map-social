@@ -210,6 +210,14 @@ struct NewPostView: View {
 
     // MARK: - 写真
 
+    /// プレビューの表示サイズ（縦横比を保ったまま、幅・高さの上限に収める）
+    private static func previewSize(_ image: UIImage) -> CGSize {
+        let maxW = UIScreen.main.bounds.width - 32
+        let maxH: CGFloat = 190
+        let ratio = max(image.size.width, 1) / max(image.size.height, 1)
+        return CGSize(width: min(maxW, maxH * ratio), height: min(maxH, maxW / ratio))
+    }
+
     /// 写真の撮影地点をそのまま投稿地点に使う状態か
     private var usingCapturedCoordinate: Bool {
         attachment?.capturedCoordinate != nil && useCapturedCoordinate
@@ -229,23 +237,28 @@ struct NewPostView: View {
     private var photoSection: some View {
         if let attachment {
             VStack(alignment: .leading, spacing: 8) {
-                ZStack(alignment: .topTrailing) {
+                // 縦横比はそのまま。幅と高さの上限に収めるので、縦長・正方形・パノラマの
+                // どれでも切り取られず、削除ボタンは常に写真の右上に載る。
+                HStack {
+                    Spacer(minLength: 0)
+                    let size = Self.previewSize(attachment.preview)
                     Image(uiImage: attachment.preview)
                         .resizable()
-                        .scaledToFill()
-                        .frame(height: 150)
-                        .frame(maxWidth: .infinity)
-                        .clipped()
+                        .scaledToFit()
+                        .frame(width: size.width, height: size.height)
                         .clipShape(RoundedRectangle(cornerRadius: 12))
-                    Button {
-                        self.attachment = nil
-                        pickerItem = nil
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .font(.title2)
-                            .foregroundStyle(.white, .black.opacity(0.5))
-                    }
-                    .padding(8)
+                        .overlay(alignment: .topTrailing) {
+                            Button {
+                                self.attachment = nil
+                                pickerItem = nil
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .font(.title2)
+                                    .foregroundStyle(.white, .black.opacity(0.5))
+                            }
+                            .padding(6)
+                        }
+                    Spacer(minLength: 0)
                 }
                 if attachment.fromCamera {
                     Label("いま撮影した写真", systemImage: "camera.fill")
