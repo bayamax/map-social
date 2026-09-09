@@ -59,14 +59,20 @@ final class TimelineViewModel: ObservableObject {
             .store(in: &cancellables)
     }
 
-    func createPost(content: String, location: CLLocation?, imageData: Data? = nil) {
+    /// - Parameter completion: 失敗理由を呼び出し側に返す。nil なら成功。
+    ///   以前は失敗しても黙って閉じていたので「投稿したのに出てこない」状態になっていた。
+    func createPost(content: String, location: CLLocation?, imageData: Data? = nil,
+                    completion: ((String?) -> Void)? = nil) {
         APIService.shared.createPost(content: content, location: location, imageData: imageData)
-            .sink(receiveCompletion: { completion in
-                if case .failure(let error) = completion {
+            .sink(receiveCompletion: { result in
+                if case .failure(let error) = result {
                     print("Post creation failed: \(error.localizedDescription)")
+                    let message = (error as? APIService.APIServiceError)?.message ?? error.localizedDescription
+                    completion?(message)
                 }
             }, receiveValue: { [weak self] post in
                 self?.posts.insert(post, at: 0)
+                completion?(nil)
             })
             .store(in: &cancellables)
     }

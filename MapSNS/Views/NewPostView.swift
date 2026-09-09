@@ -20,6 +20,7 @@ struct NewPostView: View {
     /// ライブラリ写真に撮影地点がある場合、そこに貼るか（既定 ON）
     @State private var useCapturedCoordinate = true
     @State private var photoError: String?
+    @State private var postError: String?
 
     // ゲスト投稿: 書き終えて「投稿」を押した時点で初めて登録を促す。
     // 入力内容は content に残したままなので、登録後そのまま投稿できる。
@@ -152,6 +153,11 @@ struct NewPostView: View {
             guard let item else { return }
             Task { await loadLibraryPhoto(item) }
         }
+        .alert("投稿できませんでした", isPresented: Binding(get: { postError != nil }, set: { if !$0 { postError = nil } })) {
+            Button("OK", role: .cancel) { postError = nil }
+        } message: {
+            Text(postError ?? "")
+        }
         .alert("写真", isPresented: Binding(get: { photoError != nil }, set: { if !$0 { photoError = nil } })) {
             Button("OK", role: .cancel) { photoError = nil }
         } message: {
@@ -187,11 +193,14 @@ struct NewPostView: View {
         } else {
             location = includeLocation ? locationManager.lastLocation : nil
         }
-        viewModel.createPost(content: content, location: location, imageData: attachment?.jpeg)
-        // 投稿完了後に閉じる
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+        // 成功したときだけ閉じる。失敗したら理由を出して入力内容を残す。
+        viewModel.createPost(content: content, location: location, imageData: attachment?.jpeg) { error in
             isPosting = false
-            dismiss()
+            if let error {
+                postError = error
+            } else {
+                dismiss()
+            }
         }
     }
 

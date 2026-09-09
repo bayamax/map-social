@@ -177,7 +177,8 @@ struct MapTimelineView: View {
                 ForEach(viewModel.postsWithLocation) { post in
                     // しっぽの先（吹き出し下端中央）が座標に一致するよう .bottom アンカー
                     Annotation("", coordinate: post.location!.coordinate, anchor: .bottom) {
-                        ChatBubble(text: LinkedText.stripped(post.content), imageURL: post.imageThumbURL)
+                        ChatBubble(text: LinkedText.stripped(post.content), imageURL: post.imageThumbURL,
+                                   imageWidth: photoBubbleWidth)
                             .frame(maxWidth: 160)
                             .shadow(radius: 2)
                             .contentShape(Rectangle())
@@ -838,6 +839,14 @@ struct MapTimelineView: View {
             }
         }
         #endif
+    }
+
+    /// 写真バブルの表示幅。寄れば大きく、地球儀まで引くと小さく。
+    /// 引きで大きいままだと写真が地図を覆ってしまうので、表示範囲の広さ（度）で対数補間する。
+    private var photoBubbleWidth: CGFloat {
+        let span = max(viewModel.region.span.latitudeDelta, 0.001)
+        let t = (log10(span) - log10(0.02)) / (log10(40.0) - log10(0.02))   // 0.02°=街区 → 40°=地球儀
+        return 132 - CGFloat(min(max(t, 0), 1)) * (132 - 40)
     }
 
     /// 撮影用モック機体はカメラの注視点に撒きたい（傾けた地図では region.center が大きく北にずれる）

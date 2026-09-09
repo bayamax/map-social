@@ -4,6 +4,8 @@ struct ChatBubble: View {
     let text: String
     /// 写真投稿のサムネイル（480px）。地図では原寸を絶対に使わない。
     var imageURL: URL? = nil
+    /// 写真の表示幅（地図のズームに応じて呼び出し側が決める）
+    var imageWidth: CGFloat = 132
     private let tailLength: CGFloat = 13
 
     var body: some View {
@@ -24,19 +26,19 @@ struct ChatBubble: View {
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
                 }
-                .frame(width: 136, height: 102)
-                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .frame(width: imageWidth, height: imageWidth * 0.75)
+                .clipShape(RoundedRectangle(cornerRadius: max(4, imageWidth / 17)))
             }
-            if !text.isEmpty {
+            if !text.isEmpty, imageURL == nil {
                 Text(text)
                     .font(.caption)
                     // 白い吹き出しなので、ダークマップ時でも読めるよう常に濃色
                     .foregroundColor(.black)
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.top, 9)
-        .padding(.bottom, 9 + tailLength) // 本文余白 + しっぽの長さ
+        .padding(.horizontal, imageURL == nil ? 12 : 5)
+        .padding(.top, imageURL == nil ? 9 : 5)
+        .padding(.bottom, (imageURL == nil ? 9 : 5) + tailLength) // 本文余白 + しっぽの長さ
         .background(
             shape
                 .fill(Color.white)
