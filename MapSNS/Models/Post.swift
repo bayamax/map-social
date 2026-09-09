@@ -47,6 +47,10 @@ struct Post: Identifiable, Decodable {
     let content: String
     let createdAt: Date
     let location: Location?
+    /// 写真投稿の画像。文字だけの投稿・他アプリからの投稿では nil。
+    var imageURL: URL? = nil
+    /// 地図の吹き出し用の縮小版（480px）。原寸を並べると通信量が跳ねるので必ずこちらを使う。
+    var imageThumbURL: URL? = nil
     // その他必要に応じて…
     
     enum CodingKeys: String, CodingKey {
@@ -55,5 +59,7 @@ struct Post: Identifiable, Decodable {
         case content
         case createdAt = "created_at"
         case location
+        case imageURL = "image_url"
+        case imageThumbURL = "image_thumb_url"
     }
 } 

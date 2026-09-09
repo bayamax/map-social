@@ -10,5 +10,12 @@
 	<string>位置情報をマップ上に表示するために使用します。</string>
 	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
 	<string>位置情報をマップ上に表示するために使用します。</string>
+	<key>NSCameraUsageDescription</key>
+	<string>その場で写真を撮って地図に投稿するために使用します。</string>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
 </dict>
 </plist>

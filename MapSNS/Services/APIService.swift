@@ -24,6 +24,12 @@ final class APIService {
     
     // TODO: Info.plist に API_BASE_URL キーを追加しておくこと
     private var baseURL: String {
+        #if DEBUG
+        // ローカル検証用（DEBUG のみ）。例: API_BASE_URL_OVERRIDE=http://127.0.0.1:8009
+        if let override = ProcessInfo.processInfo.environment["API_BASE_URL_OVERRIDE"], !override.isEmpty {
+            return override.hasSuffix("/") ? String(override.dropLast()) : override
+        }
+        #endif
         guard let urlString = Bundle.main.object(forInfoDictionaryKey: "API_BASE_URL") as? String else {
             fatalError("API_BASE_URL が Info.plist に設定されていません")
         }
@@ -189,26 +195,43 @@ final class APIService {
     }
     
     // MARK: - 投稿作成
-    func createPost(content: String, location: CLLocation?, parentPostID: Int? = nil) -> AnyPublisher<Post, Error> {
+    /// - Parameter imageData: 添付写真（JPEG）。nil なら従来どおり JSON で送る。
+    ///   写真がある場合だけ multipart に切り替えるので、文字だけの投稿の経路は一切変わらない。
+    func createPost(content: String, location: CLLocation?, parentPostID: Int? = nil,
+                    imageData: Data? = nil) -> AnyPublisher<Post, Error> {
         guard let url = URL(string: "\(apiURL)/posts/") else {
             return Fail(error: URLError(.badURL)).eraseToAnyPublisher()
         }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        
-        var body: [String: Any] = ["content": content]
+
+        var fields: [String: String] = ["content": content]
         if let parent = parentPostID {
-            body["parent_post"] = parent
+            fields["parent_post"] = String(parent)
         }
         if let location {
             let lat = Double(round(location.coordinate.latitude * 1_000_000) / 1_000_000)
             let lon = Double(round(location.coordinate.longitude * 1_000_000) / 1_000_000)
-            body["latitude"] = lat
-            body["longitude"] = lon
+            fields["latitude"] = String(lat)
+            fields["longitude"] = String(lon)
         }
-        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+
+        if let imageData {
+            let boundary = "MapSNS-\(UUID().uuidString)"
+            request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+            request.httpBody = Self.multipartBody(boundary: boundary, fields: fields,
+                                                  fileField: "image", fileName: "photo.jpg",
+                                                  mimeType: "image/jpeg", fileData: imageData)
+        } else {
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            var body: [String: Any] = ["content": content]
+            if let parent = parentPostID { body["parent_post"] = parent }
+            if let lat = fields["latitude"], let lon = fields["longitude"] {
+                body["latitude"] = Double(lat); body["longitude"] = Double(lon)
+            }
+            request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        }
         
         return authorizedData { request }
             .tryMap { output in
@@ -223,6 +246,25 @@ final class APIService {
             .eraseToAnyPublisher()
     }
     
+    /// multipart/form-data の本体を組み立てる（写真つき投稿用）
+    private static func multipartBody(boundary: String, fields: [String: String],
+                                      fileField: String, fileName: String,
+                                      mimeType: String, fileData: Data) -> Data {
+        var body = Data()
+        func append(_ s: String) { body.append(Data(s.utf8)) }
+        for (key, value) in fields {
+            append("--\(boundary)\r\n")
+            append("Content-Disposition: form-data; name=\"\(key)\"\r\n\r\n")
+            append("\(value)\r\n")
+        }
+        append("--\(boundary)\r\n")
+        append("Content-Disposition: form-data; name=\"\(fileField)\"; filename=\"\(fileName)\"\r\n")
+        append("Content-Type: \(mimeType)\r\n\r\n")
+        body.append(fileData)
+        append("\r\n--\(boundary)--\r\n")
+        return body
+    }
+
     // MARK: - 投稿通報
     func reportPost(postID: Int, reason: String?) -> AnyPublisher<Void, Error> {
         guard let url = URL(string: "\(apiURL)/posts/\(postID)/report/") else {

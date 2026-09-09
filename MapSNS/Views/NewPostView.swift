@@ -1,5 +1,7 @@
 import SwiftUI
 import CoreLocation
+import PhotosUI
+import UIKit
 
 struct NewPostView: View {
     @EnvironmentObject var locationManager: LocationManager
@@ -10,6 +12,14 @@ struct NewPostView: View {
     @AppStorage("defaultIncludeLocation") private var defaultIncludeLocation = true
     @State private var includeLocation: Bool
     @State private var isPosting = false
+
+    // 写真投稿
+    @State private var attachment: PhotoAttachment?
+    @State private var pickerItem: PhotosPickerItem?
+    @State private var isShowingCamera = false
+    /// ライブラリ写真に撮影地点がある場合、そこに貼るか（既定 ON）
+    @State private var useCapturedCoordinate = true
+    @State private var photoError: String?
 
     // ゲスト投稿: 書き終えて「投稿」を押した時点で初めて登録を促す。
     // 入力内容は content に残したままなので、登録後そのまま投稿できる。
@@ -34,6 +44,8 @@ struct NewPostView: View {
                     .frame(minHeight: 150)
                     .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.3)))
                 
+                photoSection
+
                 if let coord = presetCoordinate {
                     // 地図でドラッグして選んだ地点に投稿
                     HStack(spacing: 6) {
@@ -45,6 +57,13 @@ struct NewPostView: View {
                     Text(String(format: "%.5f, %.5f", coord.latitude, coord.longitude))
                         .font(.caption)
                         .foregroundColor(.secondary)
+                } else if usingCapturedCoordinate {
+                    // 写真の撮影地点に貼るので、現在地の話は出さない（二重に場所を聞かない）
+                    HStack(spacing: 6) {
+                        Image(systemName: "mappin.circle.fill").foregroundColor(.red)
+                        Text("写真を撮った場所に投稿します")
+                    }
+                    .font(.subheadline)
                 } else {
                     Toggle(isOn: $includeLocation) {
                         Text("現在地を添付する")
@@ -79,7 +98,7 @@ struct NewPostView: View {
                     Button("投稿") {
                         handlePostButton()
                     }
-                    .disabled(content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isPosting || (presetCoordinate == nil && includeLocation && locationManager.lastLocation == nil))
+                    .disabled(isPostButtonDisabled)
                 }
             }
         }
@@ -103,6 +122,40 @@ struct NewPostView: View {
             if includeLocation {
                 locationManager.requestPermission()
             }
+            #if DEBUG
+            // 撮影用: SCREENSHOT_ATTACH_PHOTO=<画像パス> で写真を添付した状態にする
+            let env = ProcessInfo.processInfo.environment
+            if attachment == nil, let path = env["SCREENSHOT_ATTACH_PHOTO"],
+               let image = UIImage(contentsOfFile: path) {
+                var a = PhotoAttachment(image: image, fromCamera: env["SCREENSHOT_ATTACH_CAMERA"] != "0")
+                if a?.fromCamera == false, let data = try? Data(contentsOf: URL(fileURLWithPath: path)) {
+                    let meta = ImageMetadata.read(from: data)
+                    a?.capturedAt = meta.date
+                    a?.capturedCoordinate = meta.coordinate
+                }
+                attachment = a
+                if let text = env["SCREENSHOT_ATTACH_TEXT"], content.isEmpty { content = text }
+            }
+            #endif
+        }
+        .fullScreenCover(isPresented: $isShowingCamera) {
+            CameraPicker { image in
+                if let a = PhotoAttachment(image: image, fromCamera: true) {
+                    attachment = a
+                } else {
+                    photoError = "写真を読み込めませんでした"
+                }
+            }
+            .ignoresSafeArea()
+        }
+        .onChange(of: pickerItem) { item in
+            guard let item else { return }
+            Task { await loadLibraryPhoto(item) }
+        }
+        .alert("写真", isPresented: Binding(get: { photoError != nil }, set: { if !$0 { photoError = nil } })) {
+            Button("OK", role: .cancel) { photoError = nil }
+        } message: {
+            Text(photoError ?? "")
         }
         .sheet(isPresented: $isShowingAuth) {
             AuthPromptView(message: "登録すると、いま書いた内容がこの場所に置かれます。")
@@ -128,10 +181,13 @@ struct NewPostView: View {
         let location: CLLocation?
         if let coord = presetCoordinate {
             location = CLLocation(latitude: coord.latitude, longitude: coord.longitude)
+        } else if let shot = attachment?.capturedCoordinate, useCapturedCoordinate {
+            // ライブラリ写真は「撮った場所」に貼るのが自然（本人が外せる）
+            location = CLLocation(latitude: shot.latitude, longitude: shot.longitude)
         } else {
             location = includeLocation ? locationManager.lastLocation : nil
         }
-        viewModel.createPost(content: content, location: location)
+        viewModel.createPost(content: content, location: location, imageData: attachment?.jpeg)
         // 投稿完了後に閉じる
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
             isPosting = false
@@ -151,7 +207,96 @@ struct NewPostView: View {
             submitPost()
         }
     }
+
+    // MARK: - 写真
+
+    /// 写真の撮影地点をそのまま投稿地点に使う状態か
+    private var usingCapturedCoordinate: Bool {
+        attachment?.capturedCoordinate != nil && useCapturedCoordinate
+    }
+
+    private var isPostButtonDisabled: Bool {
+        let hasText = !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        // 写真だけの投稿も許す（地図に写真が貼られるのが主役なので）
+        if !hasText && attachment == nil { return true }
+        if isPosting { return true }
+        // 撮影地点を使う場合は現在地を待つ必要がない
+        if usingCapturedCoordinate { return false }
+        return presetCoordinate == nil && includeLocation && locationManager.lastLocation == nil
+    }
+
+    @ViewBuilder
+    private var photoSection: some View {
+        if let attachment {
+            VStack(alignment: .leading, spacing: 8) {
+                ZStack(alignment: .topTrailing) {
+                    Image(uiImage: attachment.preview)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(height: 160)
+                        .frame(maxWidth: .infinity)
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                    Button {
+                        self.attachment = nil
+                        pickerItem = nil
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.title2)
+                            .foregroundStyle(.white, .black.opacity(0.5))
+                    }
+                    .padding(8)
+                }
+                if attachment.fromCamera {
+                    Label("いま撮影した写真", systemImage: "camera.fill")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                } else {
+                    if let date = attachment.capturedAt {
+                        Label(date.formatted(date: .abbreviated, time: .shortened) + " の写真",
+                              systemImage: "photo.on.rectangle")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    if attachment.capturedCoordinate != nil {
+                        Toggle("撮影した場所に貼る", isOn: $useCapturedCoordinate)
+                            .font(.caption)
+                    }
+                }
+            }
+        } else {
+            HStack(spacing: 12) {
+                if UIImagePickerController.isSourceTypeAvailable(.camera) {
+                    Button {
+                        isShowingCamera = true
+                    } label: {
+                        Label("撮影", systemImage: "camera.fill")
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+                PhotosPicker(selection: $pickerItem, matching: .images, photoLibrary: .shared()) {
+                    Label("ライブラリ", systemImage: "photo.on.rectangle")
+                }
+                .buttonStyle(.bordered)
+                Spacer()
+            }
+        }
+    }
+
+    private func loadLibraryPhoto(_ item: PhotosPickerItem) async {
+        guard let data = try? await item.loadTransferable(type: Data.self),
+              let image = UIImage(data: data),
+              var a = PhotoAttachment(image: image, fromCamera: false) else {
+            await MainActor.run { photoError = "写真を読み込めませんでした" }
+            return
+        }
+        // EXIF は「いつ・どこで撮ったか」を拾うためだけに読む（送信データには載せない）
+        let meta = ImageMetadata.read(from: data)
+        a.capturedAt = meta.date
+        a.capturedCoordinate = meta.coordinate
+        await MainActor.run { attachment = a }
+    }
 }
+
 #Preview {
     NewPostView(viewModel: TimelineViewModel())
         .environmentObject(LocationManager())

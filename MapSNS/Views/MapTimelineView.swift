@@ -177,7 +177,7 @@ struct MapTimelineView: View {
                 ForEach(viewModel.postsWithLocation) { post in
                     // しっぽの先（吹き出し下端中央）が座標に一致するよう .bottom アンカー
                     Annotation("", coordinate: post.location!.coordinate, anchor: .bottom) {
-                        ChatBubble(text: LinkedText.stripped(post.content))
+                        ChatBubble(text: LinkedText.stripped(post.content), imageURL: post.imageThumbURL)
                             .frame(maxWidth: 160)
                             .shadow(radius: 2)
                             .contentShape(Rectangle())
@@ -760,6 +760,31 @@ struct MapTimelineView: View {
                 }
             }
         }
+        // SCREENSHOT_OPENPOST=<投稿ID> で投稿詳細シートを自動で開く
+        if let idStr = env["SCREENSHOT_OPENPOST"], let pid = Int(idStr) {
+            let delay = Double(env["SCREENSHOT_OPENPOST_DELAY"] ?? "6") ?? 6
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                if let p = viewModel.posts.first(where: { $0.id == pid }) { viewModel.selectedPost = p }
+            }
+        }
+        // SCREENSHOT_NEWPOST=1 で新規投稿シートを自動で開く（写真投稿UIの確認・撮影用）
+        if env["SCREENSHOT_NEWPOST"] == "1" {
+            let delay = Double(env["SCREENSHOT_NEWPOST_DELAY"] ?? "2") ?? 2
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { isPresentingNewPost = true }
+        }
+        // SCREENSHOT_POST_PHOTO="<画像パス>[|本文]" で写真つき投稿を実際に送る（アップロード経路のE2E確認）
+        if let spec = env["SCREENSHOT_POST_PHOTO"] {
+            let parts = spec.split(separator: "|", maxSplits: 1).map(String.init)
+            let delay = Double(env["SCREENSHOT_POST_DELAY"] ?? "6") ?? 6
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                guard let image = UIImage(contentsOfFile: parts[0]),
+                      let a = PhotoAttachment(image: image, fromCamera: true) else { return }
+                let c = currentCamera?.centerCoordinate ?? viewModel.region.center
+                viewModel.createPost(content: parts.count > 1 ? parts[1] : "",
+                                     location: CLLocation(latitude: c.latitude, longitude: c.longitude),
+                                     imageData: a.jpeg)
+            }
+        }
         // SCREENSHOT_TOUR="at,dur,lat,lon,distance,pitch[,heading];at,cam,<webcam id>;at,close;…"
         // App Preview 動画用：起動 at 秒後にカメラを dur 秒かけて移動／ライブカメラを開閉する
         if let tour = env["SCREENSHOT_TOUR"] {
@@ -953,6 +978,21 @@ struct PostDetailSheet: View {
                         }
                     }
                 }
+            if let imageURL = post.imageURL {
+                AsyncImage(url: imageURL) { phase in
+                    switch phase {
+                    case .success(let image):
+                        image.resizable().scaledToFit()
+                    case .failure:
+                        Label("画像を読み込めませんでした", systemImage: "photo")
+                            .font(.caption).foregroundColor(.secondary)
+                    default:
+                        ProgressView().frame(height: 120)
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: 320)
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+            }
             LinkedText(post.content)
                 .font(.body)
             if let loc = post.location {

@@ -59,8 +59,8 @@ final class TimelineViewModel: ObservableObject {
             .store(in: &cancellables)
     }
 
-    func createPost(content: String, location: CLLocation?) {
-        APIService.shared.createPost(content: content, location: location)
+    func createPost(content: String, location: CLLocation?, imageData: Data? = nil) {
+        APIService.shared.createPost(content: content, location: location, imageData: imageData)
             .sink(receiveCompletion: { completion in
                 if case .failure(let error) = completion {
                     print("Post creation failed: \(error.localizedDescription)")
