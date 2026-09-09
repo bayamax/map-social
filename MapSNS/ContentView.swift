@@ -41,7 +41,11 @@ struct ContentView: View {
                     }
                 }
             }
-            .onAppear { autoLoginForScreenshotsIfNeeded() }
+            .onAppear {
+                autoLoginForScreenshotsIfNeeded()
+                // 表示設定（投稿の表示期間・写真の大きさ）をサーバーから取得
+                AppConfigService.shared.refresh()
+            }
     }
 
     private func askLocationPermissionIfNeeded() {

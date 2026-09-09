@@ -6,7 +6,10 @@ struct ChatBubble: View {
     var imageURL: URL? = nil
     /// 写真の表示幅（地図のズームに応じて呼び出し側が決める）
     var imageWidth: CGFloat = 132
+    /// 写真の見た目（比率・角丸・縁）。サーバー設定で調整できる。
+    var photo = AppConfigService.PhotoConfig()
     private let tailLength: CGFloat = 13
+    private var cornerRadius: CGFloat { max(3, imageWidth * CGFloat(photo.cornerRatio)) }
 
     var body: some View {
         if let imageURL {
@@ -27,17 +30,20 @@ struct ChatBubble: View {
                             .background(Color.white.opacity(0.85))
                     }
                 }
-                .frame(width: imageWidth, height: imageWidth * 0.75)
-                .clipShape(RoundedRectangle(cornerRadius: max(5, imageWidth / 14)))
+                .frame(width: imageWidth, height: imageWidth * CGFloat(photo.aspect))
+                .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
                 .overlay(
-                    RoundedRectangle(cornerRadius: max(5, imageWidth / 14))
-                        .stroke(Color.white.opacity(0.9), lineWidth: max(1, imageWidth / 90))
+                    RoundedRectangle(cornerRadius: cornerRadius)
+                        .stroke(Color.white.opacity(0.9),
+                                lineWidth: max(0, imageWidth * CGFloat(photo.borderRatio)))
                 )
                 // 撮られた地点を示す小さな点（しっぽの代わり）
-                Circle()
-                    .fill(Color.white)
-                    .frame(width: 5, height: 5)
-                    .shadow(color: .black.opacity(0.35), radius: 1)
+                if photo.showDot {
+                    Circle()
+                        .fill(Color.white)
+                        .frame(width: 5, height: 5)
+                        .shadow(color: .black.opacity(0.35), radius: 1)
+                }
             }
         } else {
             // 書き込み中の吹き出し（TypingBubble）と同じ、なめらか一体型しっぽの形状

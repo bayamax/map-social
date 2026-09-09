@@ -13,8 +13,9 @@ final class TimelineViewModel: ObservableObject {
     
     private var cancellables = Set<AnyCancellable>()
     
-    /// 投稿の表示時間（時間）
-    private let displayWindowHours: Double = 72
+    /// 投稿の表示時間（時間）。サーバー設定（/api/app-config/）で決める。
+    /// 取得前・取得失敗時は AppConfigService の既定値（720時間＝30日）が使われる。
+    private var displayWindowHours: Double { AppConfigService.shared.config.postDisplayHours }
 
     var postsWithLocation: [Post] {
         // 位置情報付きかつブロック対象外、表示時間以内

@@ -146,6 +146,7 @@ struct MapTimelineView: View {
     @State private var bubbleCoordinate: CLLocationCoordinate2D?
     /// ドラッグで確定した投稿地点
     @State private var newPostCoordinate: CLLocationCoordinate2D?
+    @ObservedObject private var appConfig = AppConfigService.shared
 
     /// 吹き出しの持ち上げ量（足のすぐ下にピン頭が来て、被らないよう少し上に）
     private let markerLift: CGFloat = 60
@@ -178,7 +179,7 @@ struct MapTimelineView: View {
                     // しっぽの先（吹き出し下端中央）が座標に一致するよう .bottom アンカー
                     Annotation("", coordinate: post.location!.coordinate, anchor: .bottom) {
                         ChatBubble(text: LinkedText.stripped(post.content), imageURL: post.imageThumbURL,
-                                   imageWidth: photoBubbleWidth)
+                                   imageWidth: photoBubbleWidth, photo: appConfig.config.photo)
                             .frame(maxWidth: 160)
                             .shadow(radius: 2)
                             .contentShape(Rectangle())
@@ -844,9 +845,7 @@ struct MapTimelineView: View {
     /// 写真バブルの表示幅。寄れば大きく、地球儀まで引くと小さく。
     /// 引きで大きいままだと写真が地図を覆ってしまうので、表示範囲の広さ（度）で対数補間する。
     private var photoBubbleWidth: CGFloat {
-        let span = max(viewModel.region.span.latitudeDelta, 0.001)
-        let t = (log10(span) - log10(0.02)) / (log10(40.0) - log10(0.02))   // 0.02°=街区 → 40°=地球儀
-        return 132 - CGFloat(min(max(t, 0), 1)) * (132 - 24)
+        AppConfigService.shared.photoWidth(forSpan: viewModel.region.span.latitudeDelta)
     }
 
     /// 撮影用モック機体はカメラの注視点に撒きたい（傾けた地図では region.center が大きく北にずれる）

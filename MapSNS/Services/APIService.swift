@@ -38,6 +38,9 @@ final class APIService {
     
     private var apiURL: String { "\(baseURL)/api" }
 
+    /// 他サービス（AppConfigService など）が同じ接続先を使うための公開プロパティ
+    var publicBaseURL: String { baseURL }
+
     // 進行中のリフレッシュを共有し多重実行を防ぐ（複数の 401 が同時に来ても更新は1回だけ）
     private let refreshLock = NSLock()
     private var refreshInFlight: AnyPublisher<String, Error>?
