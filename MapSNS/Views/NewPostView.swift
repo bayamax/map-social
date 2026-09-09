@@ -39,9 +39,9 @@ struct NewPostView: View {
 
     var body: some View {
         NavigationStack {
-            VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: attachment == nil ? 16 : 10) {
                 TextEditor(text: $content)
-                    .frame(minHeight: 150)
+                    .frame(height: attachment == nil ? 150 : 96)
                     .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.3)))
                 
                 photoSection
@@ -233,8 +233,9 @@ struct NewPostView: View {
                     Image(uiImage: attachment.preview)
                         .resizable()
                         .scaledToFill()
-                        .frame(height: 160)
+                        .frame(height: 150)
                         .frame(maxWidth: .infinity)
+                        .clipped()
                         .clipShape(RoundedRectangle(cornerRadius: 12))
                     Button {
                         self.attachment = nil
