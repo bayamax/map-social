@@ -846,7 +846,7 @@ struct MapTimelineView: View {
     private var photoBubbleWidth: CGFloat {
         let span = max(viewModel.region.span.latitudeDelta, 0.001)
         let t = (log10(span) - log10(0.02)) / (log10(40.0) - log10(0.02))   // 0.02°=街区 → 40°=地球儀
-        return 132 - CGFloat(min(max(t, 0), 1)) * (132 - 40)
+        return 132 - CGFloat(min(max(t, 0), 1)) * (132 - 24)
     }
 
     /// 撮影用モック機体はカメラの注視点に撒きたい（傾けた地図では region.center が大きく北にずれる）
