@@ -162,7 +162,26 @@ def E6(lang):
     efade(c, 2560)
     return c
 
-BUILD = {1: E1, 2: E2, 3: E3, 4: E4, 5: E5, 6: E6}
+
+T[7] = {
+ 'ja': (['写真を、', 'その場所に。'], ['撮った景色を、撮った場所に置く。', '地図が、そのまま思い出のアルバムになる。'],
+        [('カメラで撮る', ACC_DARK), ('ライブラリから', INK), ('撮った場所に', (60, 110, 200))]),
+ 'en': (['Photos, where', 'you took them.'], ['Leave a shot on the exact spot it happened.', 'The map becomes an album of your days.'],
+        [('Camera', ACC_DARK), ('From library', INK), ('Where it was shot', (60, 110, 200))]),
+ 'ru': (['Фото там, где', 'вы их сняли.'], ['Оставьте снимок на том самом месте.', 'Карта превращается в альбом ваших дней.'],
+        [('Камера', ACC_DARK), ('Из галереи', INK), ('Место съёмки', (60, 110, 200))]),
+}
+
+def E7(lang):
+    hl, sub, chips = T[7][lang]
+    c = ebg(1700)
+    y = ehead(c, hl, lang, sub)
+    chips_row(c, chips, lang, y + 40)
+    ephone(c, S(lang, 'photos'), 1060, y + 230)
+    efade(c, 2560)
+    return c
+
+BUILD = {1: E1, 2: E2, 3: E3, 4: E4, 5: E5, 6: E6, 7: E7}
 if __name__ == '__main__':
     nums = [int(a) for a in sys.argv[1].split(',')] if len(sys.argv) > 1 else list(BUILD)
     langs = sys.argv[2].split(',') if len(sys.argv) > 2 else ['ja', 'en', 'ru']
